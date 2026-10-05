@@ -137,6 +137,7 @@ func TestHandleTopologyAllocation_LostSubgroupStaysInRootRequiredTopologyDomain(
 	}
 
 	for _, task := range job.GetAllPodsMap() {
+		t.Logf("task %s subgroup %s status %s node %q", task.Name, task.SubGroupName, task.Status, task.NodeName)
 		switch task.SubGroupName {
 		case "surviving-leaf":
 			if task.Status != pod_status.Running {
