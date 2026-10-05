@@ -280,8 +280,9 @@ func (t *topologyPlugin) getJobAllocatableDomains(
 
 	// Validate that the domains do not clash with the chosen domain for active pods of the job
 	var relevantDomainsByLevel domainsByLevel
-	if hasActiveAllocatedTasks(podSets) && hasTopologyRequiredConstraint(subGroup) {
-		relevantDomainsByLevel = getRelevantDomainsWithAllocatedPods(podSets, topologyTree,
+	podSetsForAllocatedPodDomains := getPodSetsForAllocatedPodDomains(job, subGroup, podSets)
+	if hasActiveAllocatedTasks(podSetsForAllocatedPodDomains) && hasTopologyRequiredConstraint(subGroup) {
+		relevantDomainsByLevel = getRelevantDomainsWithAllocatedPods(podSetsForAllocatedPodDomains, topologyTree,
 			DomainLevel(subGroup.GetTopologyConstraint().RequiredLevel))
 	} else {
 		relevantDomainsByLevel = topologyTree.DomainsByLevel
@@ -314,6 +315,36 @@ func (t *topologyPlugin) getJobAllocatableDomains(
 	}
 
 	return domains, nil
+}
+
+func getPodSetsForAllocatedPodDomains(
+	job *podgroup_info.PodGroupInfo, subGroup *subgroup_info.SubGroupInfo, fallback map[string]*subgroup_info.PodSet,
+) map[string]*subgroup_info.PodSet {
+	if subGroup.GetName() == subgroup_info.RootSubGroupSetName {
+		return job.RootSubGroupSet.GetDescendantPodSets()
+	}
+
+	if podSet, found := job.GetAllPodSets()[subGroup.GetName()]; found {
+		return map[string]*subgroup_info.PodSet{subGroup.GetName(): podSet}
+	}
+
+	if subGroupSet := findSubGroupSet(job.RootSubGroupSet, subGroup.GetName()); subGroupSet != nil {
+		return subGroupSet.GetDescendantPodSets()
+	}
+
+	return fallback
+}
+
+func findSubGroupSet(root *subgroup_info.SubGroupSet, name string) *subgroup_info.SubGroupSet {
+	if root.GetName() == name {
+		return root
+	}
+	for _, child := range root.GetDirectSubgroupsSets() {
+		if found := findSubGroupSet(child, name); found != nil {
+			return found
+		}
+	}
+	return nil
 }
 
 func hasActiveAllocatedTasks(podSets map[string]*subgroup_info.PodSet) bool {
