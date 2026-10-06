@@ -256,7 +256,12 @@ var _ = Describe("Topology", Ordered, func() {
 					Fail(fmt.Sprintf("Replacement worker was bound to node %s, expected it to stay unschedulable "+
 						"since the running master is on node %s", current.Spec.NodeName, master.Spec.NodeName))
 				}
-				return rd.IsPodUnschedulable(current)
+				if !rd.IsPodUnschedulable(current) {
+					return false
+				}
+				GinkgoWriter.Printf("Replacement worker remains unschedulable with no assigned node (phase=%s)\n",
+					current.Status.Phase)
+				return true
 			}, "1m", "500ms").Should(BeTrue())
 		})
 	}, MustPassRepeatedly(3))
