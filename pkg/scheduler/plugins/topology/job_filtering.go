@@ -32,7 +32,7 @@ type jobAllocationMetaData struct {
 }
 
 func (t *topologyPlugin) subSetNodesFn(
-	job *podgroup_info.PodGroupInfo, subGroup *subgroup_info.SubGroupInfo, podSets map[string]*subgroup_info.PodSet,
+	job *podgroup_info.PodGroupInfo, subGroup *subgroup_info.SubGroupInfo, _ map[string]*subgroup_info.PodSet,
 	tasks []*pod_info.PodInfo, nodeSet node_info.NodeSet,
 ) ([]node_info.NodeSet, error) {
 	topologyTree, found := t.getJobTopology(subGroup)
@@ -93,7 +93,7 @@ func (t *topologyPlugin) subSetNodesFn(
 		t.subGroupNodeScores[subGroup.GetName()] = calculateNodeScores(domain, preferredLevel)
 	}
 
-	jobAllocatableDomains, err := t.getJobAllocatableDomains(job, subGroup, podSets, tasksResources, tasksCount, topologyTree, dbc)
+	jobAllocatableDomains, err := t.getJobAllocatableDomains(job, subGroup, tasksResources, tasksCount, topologyTree, dbc)
 	if err != nil {
 		return nil, err
 	}
@@ -269,8 +269,8 @@ func calcNodeAccommodation(jobAllocationMetaData *jobAllocationMetaData, node *n
 }
 
 func (t *topologyPlugin) getJobAllocatableDomains(
-	job *podgroup_info.PodGroupInfo, subGroup *subgroup_info.SubGroupInfo, podSets map[string]*subgroup_info.PodSet,
-	tasksResources resource_info.ResourceVector, tasksCount int, topologyTree *Info,
+	job *podgroup_info.PodGroupInfo, subGroup *subgroup_info.SubGroupInfo, tasksResources resource_info.ResourceVector,
+	tasksCount int, topologyTree *Info,
 	dbc *extendedresourcecache.ExtendedResourceCache,
 ) ([]*DomainInfo, error) {
 	relevantLevels, err := t.calculateRelevantDomainLevels(subGroup, topologyTree)
@@ -280,7 +280,10 @@ func (t *topologyPlugin) getJobAllocatableDomains(
 
 	// Validate that the domains do not clash with the chosen domain for active pods of the job
 	var relevantDomainsByLevel domainsByLevel
-	podSetsForAllocatedPodDomains := getPodSetsForAllocatedPodDomains(job, subGroup, podSets)
+	podSetsForAllocatedPodDomains, err := getPodSetsForAllocatedPodDomains(job, subGroup)
+	if err != nil {
+		return nil, err
+	}
 	if hasActiveAllocatedTasks(podSetsForAllocatedPodDomains) && hasTopologyRequiredConstraint(subGroup) {
 		relevantDomainsByLevel = getRelevantDomainsWithAllocatedPods(podSetsForAllocatedPodDomains, topologyTree,
 			DomainLevel(subGroup.GetTopologyConstraint().RequiredLevel))
@@ -318,21 +321,25 @@ func (t *topologyPlugin) getJobAllocatableDomains(
 }
 
 func getPodSetsForAllocatedPodDomains(
-	job *podgroup_info.PodGroupInfo, subGroup *subgroup_info.SubGroupInfo, fallback map[string]*subgroup_info.PodSet,
-) map[string]*subgroup_info.PodSet {
+	job *podgroup_info.PodGroupInfo, subGroup *subgroup_info.SubGroupInfo,
+) (map[string]*subgroup_info.PodSet, error) {
+	if job.RootSubGroupSet == nil {
+		return nil, fmt.Errorf("job %s/%s has no subgroup tree", job.Namespace, job.Name)
+	}
+
 	if subGroup.GetName() == subgroup_info.RootSubGroupSetName {
-		return job.RootSubGroupSet.GetDescendantPodSets()
+		return job.RootSubGroupSet.GetDescendantPodSets(), nil
 	}
 
 	if podSet, found := job.GetAllPodSets()[subGroup.GetName()]; found {
-		return map[string]*subgroup_info.PodSet{subGroup.GetName(): podSet}
+		return map[string]*subgroup_info.PodSet{subGroup.GetName(): podSet}, nil
 	}
 
 	if subGroupSet := findSubGroupSet(job.RootSubGroupSet, subGroup.GetName()); subGroupSet != nil {
-		return subGroupSet.GetDescendantPodSets()
+		return subGroupSet.GetDescendantPodSets(), nil
 	}
 
-	return fallback
+	return nil, fmt.Errorf("subgroup %q not found in job %s/%s", subGroup.GetName(), job.Namespace, job.Name)
 }
 
 func findSubGroupSet(root *subgroup_info.SubGroupSet, name string) *subgroup_info.SubGroupSet {
