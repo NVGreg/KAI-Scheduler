@@ -197,7 +197,14 @@ var _ = Describe("Topology", Ordered, func() {
 		})
 
 		It("required node - replacement of a subgroup member stays on the node of the running members", func(ctx context.Context) {
-			namespace := queue.GetConnectedNamespaceToQueue(testCtx.Queues[0])
+			if err := feature_flags.SetPlacementStrategy(ctx, testCtx, feature_flags.SpreadStrategy); err != nil {
+				Fail(fmt.Sprintf("Failed to patch scheduler config with spreading plugin: %v", err))
+			}
+
+			parentQueue := queue.CreateQueueObject(utils.GenerateRandomK8sName(10), "")
+			testQueue := queue.CreateQueueObject(utils.GenerateRandomK8sName(10), parentQueue.Name)
+			testCtx.AddQueues(ctx, []*v2.Queue{parentQueue, testQueue})
+			namespace := queue.GetConnectedNamespaceToQueue(testQueue)
 
 			gpusPerNode := testTopologyData.TopologyNodes[gpuNodesNames[0]].
 				Status.Allocatable[v1.ResourceName(constants.NvidiaGpuResource)]
@@ -212,8 +219,8 @@ var _ = Describe("Topology", Ordered, func() {
 				{Name: "master", MinMember: ptr.To(int32(1)), PodCount: 1},
 				{Name: "worker", MinMember: ptr.To(int32(1)), PodCount: 1},
 			}
-			hierarchy := pod_group.BuildHierarchy(ctx, testCtx.KubeClientset, testCtx.Queues[0], pgName, subGroupNodes, podResource)
-			podGroup := pod_group.Create(namespace, pgName, testCtx.Queues[0].Name)
+			hierarchy := pod_group.BuildHierarchy(ctx, testCtx.KubeClientset, testQueue, pgName, subGroupNodes, podResource)
+			podGroup := pod_group.Create(namespace, pgName, testQueue.Name)
 			podGroup.Spec.MinMember = ptr.To(int32(2))
 			podGroup.Spec.SubGroups = hierarchy.SubGroups
 			podGroup.Spec.TopologyConstraint = v2alpha2.TopologyConstraint{
@@ -233,13 +240,13 @@ var _ = Describe("Topology", Ordered, func() {
 			Expect(err).To(Succeed())
 
 			// The blocker takes the capacity freed on the master's node, so only other nodes can fit a replacement
-			blocker := rd.CreatePodObject(testCtx.Queues[0], podResource)
+			blocker := rd.CreatePodObject(testQueue, podResource)
 			blocker.Spec.NodeSelector = map[string]string{rd.NodeNameLabelKey: master.Spec.NodeName}
 			blocker, err = rd.CreatePod(ctx, testCtx.KubeClientset, blocker)
 			Expect(err).To(Succeed())
 			wait.ForPodScheduled(ctx, testCtx.ControllerClient, blocker)
 
-			replacement := pod_group.BuildHierarchy(ctx, testCtx.KubeClientset, testCtx.Queues[0], pgName,
+			replacement := pod_group.BuildHierarchy(ctx, testCtx.KubeClientset, testQueue, pgName,
 				subGroupNodes[1:], podResource).AllPods[0]
 			// Fail as soon as the replacement binds instead of waiting for an Unschedulable condition that never comes
 			Eventually(func() bool {
