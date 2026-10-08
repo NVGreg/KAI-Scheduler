@@ -542,13 +542,12 @@ func TestBindRequests(t *testing.T) {
 	}
 
 	tests := map[string]struct {
-		kubeObjects             []runtime.Object
-		kaiSchedulerObjects     []runtime.Object
-		expectedProcessing      int
-		expectedStale           int
-		expectedForDeletedNodes int
-		expectedPodStatus       map[string]map[string]pod_status.PodStatus
-		resultNodes             map[string]*resource.Quantity
+		kubeObjects                        []runtime.Object
+		kaiSchedulerObjects                []runtime.Object
+		expectedProcessing                 int
+		expectedFailedBindRequestsForShard int
+		expectedPodStatus                  map[string]map[string]pod_status.PodStatus
+		resultNodes                        map[string]*resource.Quantity
 	}{
 		"Pod with PodGroup Waiting For Binding": {
 			kubeObjects: []runtime.Object{
@@ -688,8 +687,8 @@ func TestBindRequests(t *testing.T) {
 					},
 				},
 			},
-			expectedProcessing: 0,
-			expectedStale:      1,
+			expectedProcessing:                 0,
+			expectedFailedBindRequestsForShard: 1,
 			expectedPodStatus: map[string]map[string]pod_status.PodStatus{
 				namespace1: {
 					examplePodName: pod_status.Pending,
@@ -742,7 +741,6 @@ func TestBindRequests(t *testing.T) {
 				},
 			},
 			expectedProcessing: 1,
-			expectedStale:      0,
 			expectedPodStatus: map[string]map[string]pod_status.PodStatus{
 				namespace1: {
 					examplePodName: pod_status.Pending,
@@ -793,8 +791,7 @@ func TestBindRequests(t *testing.T) {
 					},
 				},
 			},
-			expectedStale:           0,
-			expectedForDeletedNodes: 1,
+			expectedFailedBindRequestsForShard: 1,
 			expectedPodStatus: map[string]map[string]pod_status.PodStatus{
 				namespace1: {
 					examplePodName: pod_status.Pending,
@@ -843,7 +840,8 @@ func TestBindRequests(t *testing.T) {
 					},
 				},
 			},
-			expectedProcessing: 0,
+			expectedProcessing:                 0,
+			expectedFailedBindRequestsForShard: 0,
 			expectedPodStatus: map[string]map[string]pod_status.PodStatus{
 				namespace1: {
 					examplePodName: pod_status.Pending,
@@ -895,7 +893,6 @@ func TestBindRequests(t *testing.T) {
 					},
 				},
 			},
-			expectedStale: 1,
 			expectedPodStatus: map[string]map[string]pod_status.PodStatus{
 				namespace1: {
 					examplePodName: pod_status.Pending,
@@ -918,19 +915,8 @@ func TestBindRequests(t *testing.T) {
 		snapshot, err := clusterInfo.Snapshot()
 		assert.Equal(t, nil, err)
 
-		processingBindRequests := 0
-		staleBindRequests := 0
-		for _, bindRequest := range snapshot.BindRequests {
-			if bindRequest.IsFailed() {
-				staleBindRequests++
-			} else {
-				processingBindRequests++
-			}
-		}
-		assert.Equal(t, test.expectedProcessing, processingBindRequests)
-		assert.Equal(t, test.expectedStale, staleBindRequests)
-
-		assert.Equal(t, test.expectedForDeletedNodes, len(snapshot.BindRequestsForDeletedNodes))
+		assert.Equal(t, test.expectedProcessing, len(snapshot.BindRequests))
+		assert.Equal(t, test.expectedFailedBindRequestsForShard, len(snapshot.FailedBindRequestsForShard))
 
 		assertedPods := 0
 		for _, podGroup := range snapshot.PodGroupInfos {
