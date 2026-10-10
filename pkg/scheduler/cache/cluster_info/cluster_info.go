@@ -27,7 +27,6 @@ import (
 	"github.com/pkg/errors"
 	v1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/tools/cache"
 
@@ -62,7 +61,6 @@ type ClusterInfo struct {
 	restrictNodeScheduling    bool
 	clusterPodAffinityInfo    pod_affinity.ClusterPodAffinityInfo
 	includeCSIStorageObjects  bool
-	nodePoolSelector          labels.Selector
 	fairnessLevelType         FairnessLevelType
 	collectUsageData          bool
 	stuckInReleasingThreshold time.Duration
@@ -113,7 +111,6 @@ func New(
 		restrictNodeScheduling:    restrictNodeScheduling,
 		clusterPodAffinityInfo:    clusterPodAffinityInfo,
 		includeCSIStorageObjects:  includeCSIStorageObjects,
-		nodePoolSelector:          nodePoolSelector,
 		fairnessLevelType:         fairnessLevelType,
 		podGroupSync:              podGroupSync,
 		collectUsageData:          usageLister != nil,
@@ -378,10 +375,6 @@ func (c *ClusterInfo) snapshotBindRequests() (bindrequest_info.BindRequestMap, [
 	result := bindrequest_info.BindRequestMap{}
 	failedBindRequestsForShard := []*bindrequest_info.BindRequestInfo{}
 	for _, bindRequest := range bindRequests {
-		if !c.nodePoolSelector.Matches(labels.Set(bindRequest.Labels)) {
-			continue
-		}
-
 		bri := bindrequest_info.NewBindRequestInfo(bindRequest)
 		if bri.IsFailed() {
 			failedBindRequestsForShard = append(failedBindRequestsForShard, bri)
