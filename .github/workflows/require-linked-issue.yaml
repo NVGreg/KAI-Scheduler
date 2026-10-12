@@ -9,7 +9,6 @@ on:
     types: [opened, edited, reopened, synchronize, labeled, unlabeled]
     branches:
       - main
-      - 'v*.*'
   merge_group:
     types: [checks_requested]
 
