@@ -15,8 +15,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	mock_resourcereservation "github.com/kai-scheduler/KAI-scheduler/pkg/binder/binding/resourcereservation/mock"
-	"github.com/kai-scheduler/KAI-scheduler/pkg/common/constants"
+	mock_resourcereservation "github.com/NVIDIA/KAI-scheduler/pkg/binder/binding/resourcereservation/mock"
+	"github.com/NVIDIA/KAI-scheduler/pkg/common/constants"
 )
 
 var _ = Describe("Pod Controller", func() {
