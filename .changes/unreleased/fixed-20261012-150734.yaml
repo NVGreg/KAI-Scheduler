@@ -1,6 +1,0 @@
-kind: Fixed
-body: |-
-  Initialize empty GPU-sharing ConfigMap data before merging updates
-custom:
-  Author: "NVGreg"
-  Issue: "2408"
