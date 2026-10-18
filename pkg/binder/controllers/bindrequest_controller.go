@@ -33,6 +33,7 @@ import (
 	"github.com/kai-scheduler/KAI-scheduler/pkg/binder/binding"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/binder/binding/resourcereservation"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/binder/common"
+	"github.com/kai-scheduler/KAI-scheduler/pkg/binder/plugins/state"
 	"github.com/kai-scheduler/api/constants"
 
 	schedulingv1alpha2 "github.com/kai-scheduler/api/scheduling/v1alpha2"
@@ -155,6 +156,9 @@ func (r *BindRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			// An absent Pod cannot accept the old request; its UID/resourceVersion
 			// preconditions also exclude any replacement created under this name.
 			updateBindRequestStatus = kerrors.IsNotFound(readErr)
+			if updateBindRequestStatus {
+				r.forgetBindingState(bindRequest, "")
+			}
 			return result, readErr
 		}
 		pod = freshPod
@@ -167,6 +171,9 @@ func (r *BindRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		if err = r.apiReader.Get(ctx, client.ObjectKeyFromObject(pod), freshPod); err != nil {
 			updateBindRequestStatus = false
 			reportPodCondition = false
+			if kerrors.IsNotFound(err) {
+				r.forgetBindingState(bindRequest, "")
+			}
 			return result, err
 		}
 		pod = freshPod
@@ -186,6 +193,7 @@ func (r *BindRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			reportPodCondition = false
 			return result, err
 		}
+		r.forgetBindingState(bindRequest, pod.UID)
 		logger.Info("Pod is already bound to node", "name", pod.Name, "namespace", pod.Namespace,
 			"node", pod.Spec.NodeName)
 		return result, nil
@@ -247,6 +255,12 @@ func (r *BindRequestReconciler) readBindingObject(ctx context.Context, key clien
 	ctx, cancel := context.WithTimeout(ctx, bindingObservationTimeout)
 	defer cancel()
 	return r.apiReader.Get(ctx, key, obj)
+}
+
+func (r *BindRequestReconciler) forgetBindingState(bindRequest *schedulingv1alpha2.BindRequest, podUID types.UID) {
+	if forgetter, ok := r.binder.(state.Forgetter); ok {
+		forgetter.ForgetBindingState(bindRequest.UID, podUID)
+	}
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -344,6 +358,7 @@ func (r *BindRequestReconciler) deleteHandler(ctx context.Context, event event.T
 	if !ok {
 		return
 	}
+	r.forgetBindingState(bindRequest, "")
 
 	if common.IsSharedGPUAllocation(bindRequest) {
 		for _, gpuGroup := range bindRequest.Spec.SelectedFractionalGpuGroupIDs() {

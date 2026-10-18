@@ -74,6 +74,11 @@ func (b *Binder) PrepareBindingAttempt(ctx context.Context, pod *v1.Pod) error {
 	return b.prepareBindingAttempt(ctx, pod, pod.UID)
 }
 
+// ForgetBindingState releases bookkeeping after a confirmed lifecycle outcome.
+func (b *Binder) ForgetBindingState(requestUID, podUID types.UID) {
+	b.plugins.ForgetBindingState(requestUID, podUID)
+}
+
 func (b *Binder) Bind(ctx context.Context, pod *v1.Pod, node *v1.Node, bindRequest *v1alpha2.BindRequest) (err error) {
 	logger := log.FromContext(ctx)
 	intendedUID := pod.UID
