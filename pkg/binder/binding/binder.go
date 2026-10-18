@@ -36,6 +36,12 @@ const bindingConfirmationTimeout = 5 * time.Second
 
 const bindingAttemptAnnotation = "kai.scheduler/binding-attempt"
 
+// AttemptPreparer excludes prior Binding requests before a controller reports
+// an authoritative failure that occurs before Bind can run.
+type AttemptPreparer interface {
+	PrepareBindingAttempt(context.Context, *v1.Pod) error
+}
+
 type Binder struct {
 	kubeClient                 client.Client
 	apiReader                  client.Reader
@@ -57,6 +63,15 @@ func NewBinderWithAPIReader(kubeClient client.Client, apiReader client.Reader, r
 		resourceReservationService: rrs,
 		plugins:                    plugins,
 	}
+}
+
+// PrepareBindingAttempt makes prior resourceVersion-constrained Binding requests
+// stale. The legacy constructor retains its previous pre-Bind failure behavior.
+func (b *Binder) PrepareBindingAttempt(ctx context.Context, pod *v1.Pod) error {
+	if b.apiReader == nil {
+		return nil
+	}
+	return b.prepareBindingAttempt(ctx, pod, pod.UID)
 }
 
 func (b *Binder) Bind(ctx context.Context, pod *v1.Pod, node *v1.Node, bindRequest *v1alpha2.BindRequest) (err error) {

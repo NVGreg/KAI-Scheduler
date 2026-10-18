@@ -39,7 +39,8 @@ import (
 )
 
 const (
-	podBoundCondition = "PodBound"
+	podBoundCondition         = "PodBound"
+	bindingObservationTimeout = 5 * time.Second
 )
 
 // BindRequestReconciler reconciles a BindRequest object
@@ -144,9 +145,21 @@ func (r *BindRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if err = r.Client.Get(ctx, client.ObjectKeyFromObject(pod), pod); err != nil {
 		// A previous process may still have a Binding request in flight. A failed
 		// observation does not establish an outcome that is safe to publish.
-		updateBindRequestStatus = false
 		reportPodCondition = false
-		return result, err
+		if !kerrors.IsNotFound(err) {
+			updateBindRequestStatus = false
+			return result, err
+		}
+		freshPod := &v1.Pod{}
+		if readErr := r.readBindingObject(ctx, client.ObjectKeyFromObject(pod), freshPod); readErr != nil {
+			// An absent Pod cannot accept the old request; its UID/resourceVersion
+			// preconditions also exclude any replacement created under this name.
+			updateBindRequestStatus = kerrors.IsNotFound(readErr)
+			return result, readErr
+		}
+		pod = freshPod
+		err = nil
+		reportPodCondition = true
 	}
 	if pod.Spec.NodeName != "" || conflictingPodOwnerUID(bindRequest, pod) != "" {
 		// The cache may still contain a deleted Pod with the same name.
@@ -184,6 +197,20 @@ func (r *BindRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		},
 	}
 	if err = r.Client.Get(ctx, client.ObjectKeyFromObject(node), node); err != nil {
+		if kerrors.IsNotFound(err) {
+			freshNode := &v1.Node{}
+			if readErr := r.readBindingObject(ctx, client.ObjectKeyFromObject(node), freshNode); kerrors.IsNotFound(readErr) {
+				if preparer, ok := r.binder.(binding.AttemptPreparer); ok {
+					if prepareErr := preparer.PrepareBindingAttempt(ctx, pod); prepareErr == nil {
+						return result, err
+					} else {
+						err = errors.Join(err, prepareErr)
+					}
+				}
+			} else if readErr != nil {
+				err = errors.Join(err, readErr)
+			}
+		}
 		updateBindRequestStatus = false
 		reportPodCondition = false
 		return result, err
@@ -214,6 +241,12 @@ func (r *BindRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 	}
 	return result, err
+}
+
+func (r *BindRequestReconciler) readBindingObject(ctx context.Context, key client.ObjectKey, obj client.Object) error {
+	ctx, cancel := context.WithTimeout(ctx, bindingObservationTimeout)
+	defer cancel()
+	return r.apiReader.Get(ctx, key, obj)
 }
 
 // SetupWithManager sets up the controller with the Manager.
