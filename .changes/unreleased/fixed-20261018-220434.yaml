@@ -3,4 +3,4 @@ body: |-
   Preserve confirmed pod bindings after binding API response errors
 custom:
   Author: "NVGreg"
-  Issue: "2358"
+  Issue: "2452"

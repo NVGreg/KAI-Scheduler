@@ -15,6 +15,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -92,6 +93,13 @@ func TestReconcileBindingResponse(t *testing.T) {
 				WithStatusSubresource(&schedulingv1alpha2.BindRequest{}, &v1.Pod{}).
 				WithIndex(&v1.Pod{}, "spec.nodeName", nodeNameIndexer).
 				WithInterceptorFuncs(interceptor.Funcs{
+					Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+						// Simulate the identity assigned by the API, including for guarded rollback deletion.
+						if cm, ok := obj.(*v1.ConfigMap); ok && cm.UID == "" {
+							cm.UID = types.UID("configmap-" + cm.Namespace + "-" + cm.Name)
+						}
+						return c.Create(ctx, obj, opts...)
+					},
 					SubResource: func(c client.WithWatch, subresource string) client.SubResourceClient {
 						if subresource != "binding" {
 							return c.SubResource(subresource)
