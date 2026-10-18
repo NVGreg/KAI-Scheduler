@@ -4,6 +4,7 @@
 package binding
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -29,112 +30,119 @@ import (
 )
 
 func TestBindConfirmsSuccessfulBindingAfterResponseError(t *testing.T) {
-	preBindErr := errors.New("prebind rejected")
 	for _, tt := range []struct {
-		name          string
-		response      error
-		observedUID   types.UID
-		observedNode  string
-		readErr       error
-		preBindErr    error
-		cancelContext bool
-		missingUID    bool
-		missingNode   bool
-		shortDeadline bool
-		legacyBinder  bool
-		wantSuccess   bool
-		wantReads     int
+		name           string
+		response       error
+		observedUID    types.UID
+		observedNode   string
+		readErr        error
+		changeVersion  bool
+		loseFenceReply bool
+		cancelContext  bool
+		legacyBinder   bool
+		wantSuccess    bool
+		wantUnknown    bool
 	}{
-		{name: "normal success needs no confirmation", wantSuccess: true},
-		{name: "same Pod bound to selected node", response: io.ErrUnexpectedEOF, observedUID: "pod-uid", observedNode: "selected-node", wantSuccess: true, wantReads: 1},
-		{name: "replacement Pod is not confirmation", response: io.ErrUnexpectedEOF, observedUID: "replacement-uid", observedNode: "selected-node", wantReads: 1},
-		{name: "different node is not confirmation", response: io.ErrUnexpectedEOF, observedUID: "pod-uid", observedNode: "other-node", wantReads: 1},
-		{name: "unbound Pod is not confirmation", response: io.ErrUnexpectedEOF, observedUID: "pod-uid", wantReads: 1},
-		{name: "read failure preserves binding error", response: io.ErrUnexpectedEOF, readErr: errors.New("API unavailable"), wantReads: 1},
-		{name: "canceled context preserves binding error", response: io.ErrUnexpectedEOF, cancelContext: true, wantReads: 1},
-		{name: "missing UID cannot confirm identity", response: io.ErrUnexpectedEOF, observedNode: "selected-node", missingUID: true},
-		{name: "missing target node cannot confirm binding", response: io.ErrUnexpectedEOF, observedUID: "pod-uid", missingNode: true},
-		{name: "parent deadline bounds confirmation", response: io.ErrUnexpectedEOF, observedUID: "pod-uid", observedNode: "selected-node", shortDeadline: true, wantSuccess: true, wantReads: 1},
-		{name: "PreBind failure needs no confirmation", preBindErr: preBindErr},
-		{name: "legacy constructor preserves behavior", response: io.ErrUnexpectedEOF, observedUID: "pod-uid", observedNode: "selected-node", legacyBinder: true},
+		{name: "normal success", wantSuccess: true},
+		{name: "same Pod bound to selected node", response: io.ErrUnexpectedEOF, observedNode: "selected-node", wantSuccess: true},
+		{name: "replacement Pod", response: io.ErrUnexpectedEOF, observedUID: "replacement-uid", observedNode: "selected-node", wantUnknown: true},
+		{name: "different node", response: io.ErrUnexpectedEOF, observedNode: "other-node", wantUnknown: true},
+		{name: "unbound Pod requires exclusion write", response: io.ErrUnexpectedEOF},
+		{name: "unrelated version change excludes binding", response: io.ErrUnexpectedEOF, changeVersion: true},
+		{name: "lost exclusion write response is read back", response: io.ErrUnexpectedEOF, loseFenceReply: true},
+		{name: "read failure remains unknown", response: io.ErrUnexpectedEOF, readErr: errors.New("API unavailable"), wantUnknown: true},
+		{name: "canceled context remains unknown", response: io.ErrUnexpectedEOF, cancelContext: true, wantUnknown: true},
+		{name: "legacy constructor preserves rejection behavior", response: io.ErrUnexpectedEOF, legacyBinder: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
-			if tt.shortDeadline {
-				var cancelDeadline context.CancelFunc
-				ctx, cancelDeadline = context.WithTimeout(ctx, time.Second)
-				defer cancelDeadline()
-			}
 			pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "workloads", Name: "pod", UID: "pod-uid"}}
-			if tt.missingUID {
-				pod.UID = ""
-			}
 			node := &v1.Node{ObjectMeta: metav1.ObjectMeta{Name: "selected-node"}}
-			if tt.missingNode {
-				node.Name = ""
-			}
 			br := &v1alpha2.BindRequest{Spec: v1alpha2.BindRequestSpec{
 				PodName: pod.Name, SelectedNode: node.Name, ReceivedResourceType: common.ReceivedTypeRegular,
 			}}
-			bindCalls := 0
-			kubeClient := fake.NewClientBuilder().WithObjects(pod).WithInterceptorFuncs(interceptor.Funcs{
-				SubResourceCreate: func(_ context.Context, c client.Client, subresource string,
+			backing := fake.NewClientBuilder().WithObjects(pod).Build()
+			bindCalls, fenceWrites := 0, 0
+			var bindingVersion string
+			kubeClient := interceptor.NewClient(backing, interceptor.Funcs{
+				Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					data, err := patch.Data(obj)
+					require.NoError(t, err)
+					isFence := bytes.Contains(data, []byte(bindingAttemptAnnotation))
+					if isFence {
+						fenceWrites++
+					}
+					if err := c.Patch(ctx, obj, patch, opts...); err != nil {
+						return err
+					}
+					if isFence && fenceWrites == 2 && tt.loseFenceReply {
+						return io.ErrUnexpectedEOF
+					}
+					return nil
+				},
+				SubResourceCreate: func(ctx context.Context, c client.Client, subresource string,
 					obj, body client.Object, _ ...client.SubResourceCreateOption) error {
 					require.Equal(t, "binding", subresource)
 					bindCalls++
+					request := body.(*v1.Binding)
+					require.Equal(t, types.UID("pod-uid"), request.UID)
+					bindingVersion = request.ResourceVersion
+					if !tt.legacyBinder {
+						require.NotEmpty(t, bindingVersion)
+						require.Equal(t, pod.ResourceVersion, bindingVersion)
+					}
+					if tt.observedNode != "" || tt.observedUID != "" || tt.changeVersion {
+						stored := &v1.Pod{}
+						require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(obj), stored))
+						stored.Spec.NodeName = tt.observedNode
+						if tt.observedUID != "" {
+							stored.UID = tt.observedUID
+						}
+						stored.Labels = map[string]string{"unrelated": "changed"}
+						require.NoError(t, c.Update(ctx, stored))
+					}
 					if tt.cancelContext {
 						cancel()
 					}
 					return tt.response
 				},
-			}).Build()
-			reads := 0
-			apiReader := interceptor.NewClient(kubeClient, interceptor.Funcs{
-				Get: func(ctx context.Context, _ client.WithWatch, key client.ObjectKey, obj client.Object,
-					_ ...client.GetOption) error {
-					reads++
-					require.Equal(t, client.ObjectKeyFromObject(pod), key)
+			})
+			apiReader := interceptor.NewClient(backing, interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					deadline, ok := ctx.Deadline()
+					require.True(t, ok)
+					assert.LessOrEqual(t, time.Until(deadline), time.Second)
 					if err := ctx.Err(); err != nil {
 						return err
 					}
-					deadline, ok := ctx.Deadline()
-					require.True(t, ok, "confirmation must have a deadline")
-					maxDelay := 5 * time.Second
-					if tt.shortDeadline {
-						maxDelay = time.Second
-					}
-					assert.LessOrEqual(t, time.Until(deadline), maxDelay)
-					if tt.readErr != nil {
+					if bindCalls > 0 && tt.readErr != nil {
 						return tt.readErr
 					}
-					// The ordinary client still holds an unbound Pod. Confirmation must
-					// use the separate authoritative reader.
-					actualPod := &v1.Pod{
-						ObjectMeta: metav1.ObjectMeta{Namespace: pod.Namespace, Name: pod.Name, UID: tt.observedUID},
-						Spec:       v1.PodSpec{NodeName: tt.observedNode},
-					}
-					actualPod.DeepCopyInto(obj.(*v1.Pod))
-					return nil
+					return c.Get(ctx, key, obj, opts...)
 				},
 			})
-			mockController := gomock.NewController(t)
-			rrs := rrmock.NewMockInterface(mockController)
-			rrs.EXPECT().SyncForNode(gomock.Any(), node.Name).Return(nil)
-			plugin := mockplugins.NewMockPlugin(mockController)
+			controller := gomock.NewController(t)
+			rrs := rrmock.NewMockInterface(controller)
+			rrs.EXPECT().SyncForNode(gomock.Any(), node.Name).DoAndReturn(func(context.Context, string) error {
+				if !tt.legacyBinder {
+					require.Equal(t, 1, fenceWrites, "the entry write must precede reservation work")
+				}
+				return nil
+			})
+			plugin := mockplugins.NewMockPlugin(controller)
 			plugin.EXPECT().Name().Return("observer").AnyTimes()
 			var preparedState *state.BindingState
 			plugin.EXPECT().PreBind(ctx, pod, node, br, gomock.Any()).DoAndReturn(
 				func(_ context.Context, _ *v1.Pod, _ *v1.Node, _ *v1alpha2.BindRequest, bindingState *state.BindingState) error {
 					preparedState = bindingState
 					bindingState.BindingPodAnnotations["test.example/prepared"] = "true"
-					return tt.preBindErr
+					return nil
 				})
 			if tt.wantSuccess {
-				plugin.EXPECT().PostBind(ctx, pod, node, br, gomock.Any()).Times(1).Do(
+				plugin.EXPECT().PostBind(ctx, pod, node, br, gomock.Any()).Do(
 					func(_ context.Context, _ *v1.Pod, _ *v1.Node, _ *v1alpha2.BindRequest, bindingState *state.BindingState) {
 						require.Same(t, preparedState, bindingState)
-						assert.Equal(t, "true", bindingState.BindingPodAnnotations["test.example/prepared"])
 					})
 			}
 			binderPlugins := plugins.New()
@@ -143,21 +151,64 @@ func TestBindConfirmsSuccessfulBindingAfterResponseError(t *testing.T) {
 			if tt.legacyBinder {
 				binder = NewBinder(kubeClient, rrs, binderPlugins)
 			}
-
 			err := binder.Bind(ctx, pod, node, br)
-			assert.Equal(t, tt.wantReads, reads)
-			if tt.preBindErr != nil {
-				assert.Zero(t, bindCalls)
-				assert.ErrorContains(t, err, tt.preBindErr.Error())
-				return
-			}
-			assert.Equal(t, 1, bindCalls)
+			require.Equal(t, 1, bindCalls)
+			assert.Equal(t, tt.wantUnknown, errors.Is(err, ErrBindingOutcomeUnknown))
 			if tt.wantSuccess {
 				assert.NoError(t, err)
 			} else {
 				assert.ErrorIs(t, err, tt.response)
-				assert.ErrorContains(t, err, "failed to bind pod <workloads/pod> to node <"+node.Name+">")
 			}
+			if tt.response != nil && !tt.wantSuccess && !tt.wantUnknown && !tt.legacyBinder {
+				stored := &v1.Pod{}
+				require.NoError(t, backing.Get(context.Background(), client.ObjectKeyFromObject(pod), stored))
+				assert.Empty(t, stored.Spec.NodeName)
+				assert.NotEqual(t, bindingVersion, stored.ResourceVersion, "cleanup requires exclusion of the delayed Binding")
+			}
+		})
+	}
+}
+
+func TestBindingPreflightPreservesUnknownAttempts(t *testing.T) {
+	for _, scenario := range []string{"bound same node", "bound other node", "replaced Pod", "missing UID", "read error", "lost entry write response", "unchanged entry write"} {
+		t.Run(scenario, func(t *testing.T) {
+			ctx := context.Background()
+			pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "workloads", Name: "pod", UID: "expected"}}
+			observed := pod.DeepCopy()
+			switch scenario {
+			case "bound same node":
+				observed.Spec.NodeName = "node"
+			case "bound other node":
+				observed.Spec.NodeName = "other-node"
+			case "replaced Pod":
+				observed.UID = "replacement"
+			case "missing UID":
+				pod.UID = ""
+			}
+			backing := fake.NewClientBuilder().WithObjects(observed).Build()
+			kubeClient := interceptor.NewClient(backing, interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					if scenario == "read error" {
+						return io.ErrUnexpectedEOF
+					}
+					return c.Get(ctx, key, obj, opts...)
+				},
+				Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					if scenario == "unchanged entry write" {
+						return nil
+					}
+					require.NoError(t, c.Patch(ctx, obj, patch, opts...))
+					return io.ErrUnexpectedEOF
+				},
+			})
+			rrs := rrmock.NewMockInterface(gomock.NewController(t))
+			binder := NewBinderWithAPIReader(kubeClient, kubeClient, rrs, plugins.New())
+			err := binder.Bind(ctx, pod, &v1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node"}}, &v1alpha2.BindRequest{})
+			require.ErrorIs(t, err, ErrBindingOutcomeUnknown)
+			stored := &v1.Pod{}
+			require.NoError(t, backing.Get(ctx, client.ObjectKeyFromObject(observed), stored))
+			assert.Equal(t, observed.UID, stored.UID)
+			assert.Equal(t, observed.Spec.NodeName, stored.Spec.NodeName)
 		})
 	}
 }

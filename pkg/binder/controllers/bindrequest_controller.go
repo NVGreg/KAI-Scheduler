@@ -119,6 +119,8 @@ func (r *BindRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		if r := recover(); r != nil {
 			finalError = fmt.Errorf("Internal Error: %v\n%s", r, string(debug.Stack()))
 			err = fmt.Errorf("Internal Error: %v", r)
+			updateBindRequestStatus = false
+			reportPodCondition = false
 		}
 
 		if updateBindRequestStatus {
@@ -140,6 +142,10 @@ func (r *BindRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		},
 	}
 	if err = r.Client.Get(ctx, client.ObjectKeyFromObject(pod), pod); err != nil {
+		// A previous process may still have a Binding request in flight. A failed
+		// observation does not establish an outcome that is safe to publish.
+		updateBindRequestStatus = false
+		reportPodCondition = false
 		return result, err
 	}
 	if pod.Spec.NodeName != "" || conflictingPodOwnerUID(bindRequest, pod) != "" {
@@ -178,12 +184,19 @@ func (r *BindRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		},
 	}
 	if err = r.Client.Get(ctx, client.ObjectKeyFromObject(node), node); err != nil {
+		updateBindRequestStatus = false
+		reportPodCondition = false
 		return result, err
 	}
 
 	logger.Info("Binding pod to node", "pod", pod.Name, "namespace", pod.Namespace,
 		"node", node.Name)
 	err = r.binder.Bind(ctx, pod, node, bindRequest)
+	if errors.Is(err, binding.ErrBindingOutcomeUnknown) {
+		updateBindRequestStatus = false
+		reportPodCondition = false
+		return result, err
+	}
 
 	if errors.Is(err, binding.InvalidCrdWarning) {
 		logger.Info("This binding request seems to be created by failed conversion from the previous version."+

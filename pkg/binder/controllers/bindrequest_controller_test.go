@@ -555,7 +555,7 @@ var _ = Describe("BindRequest Controller", func() {
 				true, false, false,
 			),
 			Entry(
-				"missing node but backoff limit not reached",
+				"missing node retries without consuming the backoff budget",
 				[]client.Object{
 					pod.DeepCopy(),
 				},
@@ -566,7 +566,7 @@ var _ = Describe("BindRequest Controller", func() {
 					bindRequest.Spec.BackoffLimit = ptr.To(int32(1))
 					return bindRequest
 				}(),
-				true, true, false,
+				true, false, false,
 			),
 			Entry(
 				"missing node but backoff limit already reached",

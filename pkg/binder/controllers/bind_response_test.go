@@ -39,11 +39,13 @@ func TestReconcileBindingResponse(t *testing.T) {
 		response       error
 		preBindFailure bool
 		wantBound      bool
+		unknown        bool
 	}{
 		{name: "successful response", commit: true, wantBound: true},
 		{name: "committed binding with lost response", commit: true, response: io.ErrUnexpectedEOF, wantBound: true},
 		{name: "definite binding rejection", response: apierrors.NewBadRequest("binding rejected")},
 		{name: "PreBind failure still rolls back", preBindFailure: true},
+		{name: "unknown delayed binding preserves allocations", response: io.ErrUnexpectedEOF, unknown: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -100,6 +102,7 @@ func TestReconcileBindingResponse(t *testing.T) {
 								bindCalls++
 								request := subresource.(*v1.Binding)
 								require.Equal(t, pod.UID, request.UID)
+								require.NotEmpty(t, request.ResourceVersion)
 								require.Equal(t, node.Name, request.Target.Name)
 								storedPod := &v1.Pod{}
 								require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(obj), storedPod))
@@ -126,11 +129,15 @@ func TestReconcileBindingResponse(t *testing.T) {
 				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object,
 					opts ...client.GetOption) error {
 					confirmationReads++
+					if tt.unknown && bindCalls > 0 {
+						return io.ErrUnexpectedEOF
+					}
 					return c.Get(ctx, key, obj, opts...)
 				},
 			})
 			binder := binding.NewBinderWithAPIReader(kubeClient, apiReader, rrs, binderPlugins)
-			reconciler := NewBindRequestReconciler(kubeClient, scheme, record.NewFakeRecorder(10),
+			events := record.NewFakeRecorder(10)
+			reconciler := NewBindRequestReconciler(kubeClient, scheme, events,
 				&ReconcilerParams{}, binder, rrs)
 
 			_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(br)})
@@ -140,15 +147,22 @@ func TestReconcileBindingResponse(t *testing.T) {
 				assert.Equal(t, 1, bindCalls)
 			}
 			if tt.response != nil && tt.commit {
-				assert.Equal(t, 1, confirmationReads)
-			} else if tt.response == nil {
-				assert.Zero(t, confirmationReads)
+				assert.Equal(t, 3, confirmationReads)
+			} else if tt.response == nil && !tt.preBindFailure {
+				assert.Equal(t, 2, confirmationReads)
 			}
 			actualPod := &v1.Pod{}
 			require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(pod), actualPod))
 			actualRequest := &schedulingv1alpha2.BindRequest{}
 			require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(br), actualRequest))
-			if tt.wantBound {
+			if tt.unknown {
+				assert.ErrorIs(t, err, binding.ErrBindingOutcomeUnknown)
+				assert.Equal(t, schedulingv1alpha2.BindRequestPhasePending, actualRequest.Status.Phase)
+				assert.Zero(t, actualRequest.Status.FailedAttempts)
+				assert.Equal(t, "allocated-group", actualPod.Labels[constants.GPUGroup])
+				assert.Empty(t, actualPod.Status.Conditions)
+				assert.Empty(t, events.Events)
+			} else if tt.wantBound {
 				assert.NoError(t, err)
 				assert.Equal(t, pod.UID, actualPod.UID)
 				assert.Equal(t, node.Name, actualPod.Spec.NodeName)
@@ -163,7 +177,7 @@ func TestReconcileBindingResponse(t *testing.T) {
 			for _, name := range []string{"fractional-pod-gpu-0", "fractional-pod-gpu-0-evar"} {
 				cm := &v1.ConfigMap{}
 				err := kubeClient.Get(ctx, client.ObjectKey{Namespace: pod.Namespace, Name: name}, cm)
-				if tt.wantBound {
+				if tt.wantBound || tt.unknown {
 					assert.NoError(t, err, "a committed bind must retain ConfigMap %s", name)
 				} else {
 					assert.True(t, apierrors.IsNotFound(err), "a rejected bind should clean up ConfigMap %s", name)
