@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	. "github.com/onsi/gomega"
 	"go.uber.org/mock/gomock"
@@ -55,6 +56,7 @@ func newPlacementTestReconciler(t *testing.T, pod *v1.Pod, bindRequest *scheduli
 func TestReconcileRefreshesCachedPodBeforeValidatingIntent(t *testing.T) {
 	tests := []struct {
 		name          string
+		cachedUID     types.UID
 		cachedNode    string
 		ownerUID      types.UID
 		actualNode    string
@@ -69,6 +71,8 @@ func TestReconcileRefreshesCachedPodBeforeValidatingIntent(t *testing.T) {
 		{name: "fresh node mismatch overrides cached matching node", cachedNode: "selected-node", ownerUID: "current-pod", actualNode: "actual-node", expectedError: "already bound to node actual-node"},
 		{name: "fresh matching groups override stale mismatching groups", cachedNode: "selected-node", ownerUID: "current-pod", actualNode: "selected-node", cachedGroup: "old-group", actualGroup: "selected-group"},
 		{name: "fresh group mismatch overrides cached matching groups", cachedNode: "selected-node", ownerUID: "current-pod", actualNode: "selected-node", cachedGroup: "selected-group", actualGroup: "actual-group", expectedError: "already bound with GPU groups [actual-group]"},
+		{name: "stale unbound cache cannot hide a fresh node mismatch", cachedUID: "current-pod", ownerUID: "current-pod", actualNode: "actual-node", expectedError: "already bound to node actual-node"},
+		{name: "stale unbound cache cannot hide a fresh group mismatch", cachedUID: "current-pod", ownerUID: "current-pod", actualNode: "selected-node", cachedGroup: "selected-group", actualGroup: "actual-group", expectedError: "already bound with GPU groups [actual-group]"},
 		{name: "optional absent owner remains compatible", cachedNode: "deleted-node", expectedBind: true},
 	}
 	for _, tt := range tests {
@@ -97,6 +101,9 @@ func TestReconcileRefreshesCachedPodBeforeValidatingIntent(t *testing.T) {
 			g.Expect(c.Get(ctx, client.ObjectKeyFromObject(pod), originalPod)).To(Succeed())
 			cachedPod := originalPod.DeepCopy()
 			cachedPod.UID = "deleted-pod"
+			if tt.cachedUID != "" {
+				cachedPod.UID = tt.cachedUID
+			}
 			cachedPod.Spec.NodeName = tt.cachedNode
 			if tt.cachedGroup != "" {
 				cachedPod.Labels = map[string]string{"runai-gpu-group": tt.cachedGroup}
@@ -114,7 +121,11 @@ func TestReconcileRefreshesCachedPodBeforeValidatingIntent(t *testing.T) {
 			r.apiReader = interceptor.NewClient(c, interceptor.Funcs{
 				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 					apiReads++
-					g.Expect(obj).To(Equal(&v1.Pod{}))
+					freshPod, ok := obj.(*v1.Pod)
+					g.Expect(ok).To(BeTrue())
+					g.Expect(freshPod.UID).To(BeEmpty())
+					g.Expect(freshPod.Spec.NodeName).To(BeEmpty())
+					g.Expect(freshPod.Labels).To(BeEmpty())
 					return c.Get(ctx, key, obj, opts...)
 				},
 			})
@@ -155,7 +166,6 @@ func TestReconcileDoesNotConsumeRetryBudgetOnAuthoritativeReadError(t *testing.T
 	for _, phase := range []string{schedulingv1alpha2.BindRequestPhasePending, schedulingv1alpha2.BindRequestPhaseFailed} {
 		for _, readErr := range []error{
 			errors.New("API is temporarily unavailable"),
-			kerrors.NewNotFound(schema.GroupResource{Resource: "pods"}, "bound-pod"),
 		} {
 			t.Run(phase+"/"+readErr.Error(), func(t *testing.T) {
 				g := NewWithT(t)
@@ -211,7 +221,64 @@ func TestReconcileDoesNotConsumeRetryBudgetOnAuthoritativeReadError(t *testing.T
 	}
 }
 
-func TestReconcileAuthoritativePodUsesEmptyDecodeTarget(t *testing.T) {
+func TestReconcileAuthoritativePodAbsenceKeepsFailureContract(t *testing.T) {
+	tests := []struct {
+		name           string
+		phase          string
+		failedAttempts int32
+		backoffLimit   *int32
+	}{
+		{name: "Pending without retry budget", phase: schedulingv1alpha2.BindRequestPhasePending},
+		{name: "Pending with retry budget", phase: schedulingv1alpha2.BindRequestPhasePending, backoffLimit: ptr.To(int32(3))},
+		{name: "retryable Failed", phase: schedulingv1alpha2.BindRequestPhaseFailed, failedAttempts: 1, backoffLimit: ptr.To(int32(3))},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := NewWithT(t)
+			ctx := context.Background()
+			pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "deleted-pod", Namespace: "default", UID: "deleted-pod-uid"}}
+			bindRequest := baseRequest.DeepCopy()
+			bindRequest.Spec.PodName = pod.Name
+			bindRequest.Spec.SelectedNode = "selected-node"
+			bindRequest.Spec.BackoffLimit = tt.backoffLimit
+			bindRequest.Status.Phase = tt.phase
+			bindRequest.Status.FailedAttempts = tt.failedAttempts
+			bindRequest.Status.Reason = "previous binding failure"
+			r, c, recorder := newPlacementTestReconciler(t, pod, bindRequest)
+			g.Expect(c.Delete(ctx, pod)).To(Succeed())
+			r.Client = interceptor.NewClient(c, interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					if cachedPod, ok := obj.(*v1.Pod); ok {
+						pod.DeepCopyInto(cachedPod)
+						return nil
+					}
+					return c.Get(ctx, key, obj, opts...)
+				},
+			})
+
+			result, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(bindRequest)})
+			g.Expect(kerrors.IsNotFound(err)).To(BeTrue())
+			g.Expect(errors.Is(err, reconcile.TerminalError(nil))).To(Equal(tt.backoffLimit == nil))
+			expectedAttempts := tt.failedAttempts
+			expectedResult := ctrl.Result{}
+			if tt.backoffLimit != nil {
+				expectedAttempts++
+				expectedResult.RequeueAfter = (1 << tt.failedAttempts) * time.Second
+			}
+			g.Expect(result).To(Equal(expectedResult))
+			stored := &schedulingv1alpha2.BindRequest{}
+			g.Expect(c.Get(ctx, client.ObjectKeyFromObject(bindRequest), stored)).To(Succeed())
+			g.Expect(stored.Status.Phase).To(Equal(schedulingv1alpha2.BindRequestPhaseFailed))
+			g.Expect(stored.Status.FailedAttempts).To(Equal(expectedAttempts))
+			g.Expect(stored.Status.Reason).To(ContainSubstring("not found"))
+			g.Expect(c.Get(ctx, client.ObjectKeyFromObject(pod), &v1.Pod{})).To(MatchError(ContainSubstring("not found")))
+			g.Expect(recorder.Events).To(Receive(ContainSubstring("Warning BindingError")))
+			g.Expect(recorder.Events).To(BeEmpty())
+		})
+	}
+}
+
+func TestReconcileAuthoritativePodUsesFreshDecodeTarget(t *testing.T) {
 	for _, alreadyBound := range []bool{false, true} {
 		name := "deleted cached Pod must not leave node or labels on its unbound replacement"
 		if alreadyBound {
@@ -317,10 +384,11 @@ func TestReconcileFreshUnboundPodKeepsBindingPath(t *testing.T) {
 	bindRequest.Spec.ReceivedResourceType = common.ReceivedTypeFraction
 	bindRequest.Spec.SelectedGPUGroups = []string{"selected-group"}
 	r, c, recorder := newPlacementTestReconciler(t, pod, bindRequest)
+	apiReads := 0
 	r.apiReader = interceptor.NewClient(c, interceptor.Funcs{
-		Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
-			t.Error("an unbound Pod with no conflicting owner should use the existing binding path")
-			return errors.New("unexpected authoritative read")
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			apiReads++
+			return c.Get(ctx, key, obj, opts...)
 		},
 	})
 	binder := r.binder.(*mock_binder.MockInterface)
@@ -329,6 +397,7 @@ func TestReconcileFreshUnboundPodKeepsBindingPath(t *testing.T) {
 	result, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(bindRequest)})
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(result).To(Equal(ctrl.Result{}))
+	g.Expect(apiReads).To(Equal(1))
 	stored := &schedulingv1alpha2.BindRequest{}
 	g.Expect(c.Get(ctx, client.ObjectKeyFromObject(bindRequest), stored)).To(Succeed())
 	g.Expect(stored.Status.Phase).To(Equal(schedulingv1alpha2.BindRequestPhaseSucceeded))

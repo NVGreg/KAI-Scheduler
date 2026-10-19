@@ -45,8 +45,8 @@ const (
 // BindRequestReconciler reconciles a BindRequest object
 type BindRequestReconciler struct {
 	Client              client.Client
-	apiReader           client.Reader
 	Scheme              *runtime.Scheme
+	apiReader           client.Reader
 	binder              binding.Interface
 	resourceReservation resourcereservation.Interface
 	eventRecorder       record.EventRecorder
@@ -63,8 +63,8 @@ func NewBindRequestReconciler(
 ) *BindRequestReconciler {
 	return &BindRequestReconciler{
 		Client:              client,
-		apiReader:           client,
 		Scheme:              scheme,
+		apiReader:           client,
 		binder:              binder,
 		resourceReservation: resourceReservation,
 		eventRecorder:       eventRecorder,
@@ -99,7 +99,6 @@ func (r *BindRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	var bindRequest = &schedulingv1alpha2.BindRequest{}
 	var pod *v1.Pod
-	updateBindRequestStatus := true
 	reportPodCondition := true
 
 	// Fetch the BindRequest instance
@@ -114,6 +113,17 @@ func (r *BindRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return result, nil
 	}
 
+	pod = &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      bindRequest.Spec.PodName,
+			Namespace: bindRequest.Namespace,
+		},
+	}
+	// A status retry must observe a completed binding before preparing another attempt.
+	if err = r.apiReader.Get(ctx, client.ObjectKeyFromObject(pod), pod); err != nil && !kerrors.IsNotFound(err) {
+		return result, err
+	}
+
 	defer func() {
 		var finalError error
 		if r := recover(); r != nil {
@@ -121,9 +131,7 @@ func (r *BindRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			err = fmt.Errorf("Internal Error: %v", r)
 		}
 
-		if updateBindRequestStatus {
-			result, err = r.UpdateStatus(ctx, bindRequest, result, err)
-		}
+		result, err = r.UpdateStatus(ctx, bindRequest, result, err)
 		if pod != nil && reportPodCondition {
 			r.updatePodCondition(ctx, bindRequest, pod)
 		}
@@ -133,24 +141,8 @@ func (r *BindRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 	}()
 
-	pod = &v1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      bindRequest.Spec.PodName,
-			Namespace: bindRequest.Namespace,
-		},
-	}
-	if err = r.Client.Get(ctx, client.ObjectKeyFromObject(pod), pod); err != nil {
+	if err != nil {
 		return result, err
-	}
-	if pod.Spec.NodeName != "" || conflictingPodOwnerUID(bindRequest, pod) != "" {
-		// The cache may still contain a deleted Pod with the same name.
-		freshPod := &v1.Pod{}
-		if err = r.apiReader.Get(ctx, client.ObjectKeyFromObject(pod), freshPod); err != nil {
-			updateBindRequestStatus = false
-			reportPodCondition = false
-			return result, err
-		}
-		pod = freshPod
 	}
 	if ownerUID := conflictingPodOwnerUID(bindRequest, pod); ownerUID != "" {
 		reportPodCondition = false
