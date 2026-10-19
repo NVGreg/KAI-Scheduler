@@ -47,8 +47,8 @@ const (
 // BindRequestReconciler reconciles a BindRequest object
 type BindRequestReconciler struct {
 	Client              client.Client
-	apiReader           client.Reader
 	Scheme              *runtime.Scheme
+	apiReader           client.Reader
 	binder              binding.Interface
 	resourceReservation resourcereservation.Interface
 	eventRecorder       record.EventRecorder
@@ -65,8 +65,8 @@ func NewBindRequestReconciler(
 ) *BindRequestReconciler {
 	return &BindRequestReconciler{
 		Client:              client,
-		apiReader:           client,
 		Scheme:              scheme,
+		apiReader:           client,
 		binder:              binder,
 		resourceReservation: resourceReservation,
 		eventRecorder:       eventRecorder,
@@ -143,40 +143,18 @@ func (r *BindRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			Namespace: bindRequest.Namespace,
 		},
 	}
-	if err = r.Client.Get(ctx, client.ObjectKeyFromObject(pod), pod); err != nil {
+	// A status retry must observe a completed binding before preparing another attempt.
+	if err = r.readBindingObject(ctx, client.ObjectKeyFromObject(pod), pod); err != nil {
 		// A previous process may still have a Binding request in flight. A failed
 		// observation does not establish an outcome that is safe to publish.
 		reportPodCondition = false
-		if !kerrors.IsNotFound(err) {
-			updateBindRequestStatus = false
-			return result, err
-		}
-		freshPod := &v1.Pod{}
-		if readErr := r.readBindingObject(ctx, client.ObjectKeyFromObject(pod), freshPod); readErr != nil {
+		updateBindRequestStatus = kerrors.IsNotFound(err)
+		if updateBindRequestStatus {
 			// An absent Pod cannot accept the old request; its UID/resourceVersion
 			// preconditions also exclude any replacement created under this name.
-			updateBindRequestStatus = kerrors.IsNotFound(readErr)
-			if updateBindRequestStatus {
-				r.forgetBindingState(bindRequest, "")
-			}
-			return result, readErr
+			r.forgetBindingState(bindRequest, "")
 		}
-		pod = freshPod
-		err = nil
-		reportPodCondition = true
-	}
-	if pod.Spec.NodeName != "" || conflictingPodOwnerUID(bindRequest, pod) != "" {
-		// The cache may still contain a deleted Pod with the same name.
-		freshPod := &v1.Pod{}
-		if err = r.apiReader.Get(ctx, client.ObjectKeyFromObject(pod), freshPod); err != nil {
-			updateBindRequestStatus = false
-			reportPodCondition = false
-			if kerrors.IsNotFound(err) {
-				r.forgetBindingState(bindRequest, "")
-			}
-			return result, err
-		}
-		pod = freshPod
+		return result, err
 	}
 	if ownerUID := conflictingPodOwnerUID(bindRequest, pod); ownerUID != "" {
 		reportPodCondition = false
