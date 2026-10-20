@@ -36,13 +36,9 @@ type Binder struct {
 	plugins                    *plugins.BinderPlugins
 }
 
-func NewBinder(kubeClient client.Client, rrs resourcereservation.Interface, plugins *plugins.BinderPlugins) *Binder {
-	return NewBinderWithAPIReader(kubeClient, nil, rrs, plugins)
-}
-
-// NewBinderWithAPIReader confirms failed binding API responses using a reader
-// that must bypass the informer cache.
-func NewBinderWithAPIReader(kubeClient client.Client, apiReader client.Reader, rrs resourcereservation.Interface, plugins *plugins.BinderPlugins) *Binder {
+// NewBinder configures binding confirmation using a reader that must bypass the informer cache.
+// A nil apiReader disables confirmation for isolated tests.
+func NewBinder(kubeClient client.Client, apiReader client.Reader, rrs resourcereservation.Interface, plugins *plugins.BinderPlugins) *Binder {
 	return &Binder{
 		kubeClient:                 kubeClient,
 		apiReader:                  apiReader,

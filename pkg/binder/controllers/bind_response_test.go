@@ -137,7 +137,7 @@ func TestReconcileBindingResponse(t *testing.T) {
 					return c.Get(ctx, key, obj, opts...)
 				},
 			})
-			binder := binding.NewBinderWithAPIReader(kubeClient, apiReader, rrs, binderPlugins)
+			binder := binding.NewBinder(kubeClient, apiReader, rrs, binderPlugins)
 			reconciler := NewBindRequestReconciler(kubeClient, scheme, record.NewFakeRecorder(10),
 				&ReconcilerParams{}, binder, rrs)
 

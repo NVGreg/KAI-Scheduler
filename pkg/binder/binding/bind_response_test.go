@@ -31,19 +31,19 @@ import (
 func TestBindConfirmsSuccessfulBindingAfterResponseError(t *testing.T) {
 	preBindErr := errors.New("prebind rejected")
 	for _, tt := range []struct {
-		name          string
-		response      error
-		observedUID   types.UID
-		observedNode  string
-		readErr       error
-		preBindErr    error
-		cancelContext bool
-		missingUID    bool
-		missingNode   bool
-		shortDeadline bool
-		legacyBinder  bool
-		wantSuccess   bool
-		wantReads     int
+		name             string
+		response         error
+		observedUID      types.UID
+		observedNode     string
+		readErr          error
+		preBindErr       error
+		cancelContext    bool
+		missingUID       bool
+		missingNode      bool
+		shortDeadline    bool
+		withoutAPIReader bool
+		wantSuccess      bool
+		wantReads        int
 	}{
 		{name: "normal success needs no confirmation", wantSuccess: true},
 		{name: "same Pod bound to selected node", response: io.ErrUnexpectedEOF, observedUID: "pod-uid", observedNode: "selected-node", wantSuccess: true, wantReads: 1},
@@ -56,7 +56,7 @@ func TestBindConfirmsSuccessfulBindingAfterResponseError(t *testing.T) {
 		{name: "missing target node cannot confirm binding", response: io.ErrUnexpectedEOF, observedUID: "pod-uid", missingNode: true},
 		{name: "parent deadline bounds confirmation", response: io.ErrUnexpectedEOF, observedUID: "pod-uid", observedNode: "selected-node", shortDeadline: true, wantSuccess: true, wantReads: 1},
 		{name: "PreBind failure needs no confirmation", preBindErr: preBindErr},
-		{name: "legacy constructor preserves behavior", response: io.ErrUnexpectedEOF, observedUID: "pod-uid", observedNode: "selected-node", legacyBinder: true},
+		{name: "nil API reader preserves binding error", response: io.ErrUnexpectedEOF, observedUID: "pod-uid", observedNode: "selected-node", withoutAPIReader: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
@@ -90,7 +90,7 @@ func TestBindConfirmsSuccessfulBindingAfterResponseError(t *testing.T) {
 				},
 			}).Build()
 			reads := 0
-			apiReader := interceptor.NewClient(kubeClient, interceptor.Funcs{
+			var apiReader client.Reader = interceptor.NewClient(kubeClient, interceptor.Funcs{
 				Get: func(ctx context.Context, _ client.WithWatch, key client.ObjectKey, obj client.Object,
 					_ ...client.GetOption) error {
 					reads++
@@ -139,10 +139,10 @@ func TestBindConfirmsSuccessfulBindingAfterResponseError(t *testing.T) {
 			}
 			binderPlugins := plugins.New()
 			binderPlugins.RegisterPlugin(plugin)
-			binder := NewBinderWithAPIReader(kubeClient, apiReader, rrs, binderPlugins)
-			if tt.legacyBinder {
-				binder = NewBinder(kubeClient, rrs, binderPlugins)
+			if tt.withoutAPIReader {
+				apiReader = nil
 			}
+			binder := NewBinder(kubeClient, apiReader, rrs, binderPlugins)
 
 			err := binder.Bind(ctx, pod, node, br)
 			assert.Equal(t, tt.wantReads, reads)
