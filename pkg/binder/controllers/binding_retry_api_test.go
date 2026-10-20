@@ -93,7 +93,7 @@ func TestBindingRetryObservationsAPIServer(t *testing.T) {
 			if scenario == "deleted Pod progresses without reports" {
 				require.NoError(t, apiClient.Delete(ctx, pod, client.GracePeriodSeconds(0)))
 			}
-			binder := binding.NewBinderWithAPIReader(apiClient, apiClient, rrs, plugins.New())
+			binder := binding.NewBinder(apiClient, apiClient, rrs, plugins.New())
 			events := record.NewFakeRecorder(10)
 			reconciler := NewBindRequestReconciler(controllerClient, scheme, events, &ReconcilerParams{}, binder, rrs)
 			reconciler.apiReader = apiClient

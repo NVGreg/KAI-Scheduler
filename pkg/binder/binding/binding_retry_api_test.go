@@ -67,7 +67,7 @@ func TestBindingRetryProtocolAPIServer(t *testing.T) {
 		require.NoError(t, apiClient.Get(ctx, client.ObjectKeyFromObject(pod), actual))
 		return actual
 	}
-	protocol := NewBinderWithAPIReader(apiClient, apiClient, nil, plugins.New())
+	protocol := NewBinder(apiClient, apiClient, nil, plugins.New())
 
 	t.Run("changing Pod write excludes delayed Binding", func(t *testing.T) {
 		pod := newPod(t)
@@ -186,7 +186,7 @@ func TestBindingRetryProtocolAPIServer(t *testing.T) {
 			}
 			binderPlugins := plugins.New()
 			binderPlugins.RegisterPlugin(plugin)
-			binder := NewBinderWithAPIReader(writer, reader, rrs, binderPlugins)
+			binder := NewBinder(writer, reader, rrs, binderPlugins)
 			err := binder.Bind(ctx, pod, node, br)
 			switch scenario {
 			case "binding wins before exclusion write":
@@ -232,7 +232,7 @@ func TestBindingRetryProtocolAPIServer(t *testing.T) {
 		plugin.EXPECT().PreBind(gomock.Any(), pod, node, br, gomock.Any()).Return(preBindErr)
 		binderPlugins := plugins.New()
 		binderPlugins.RegisterPlugin(plugin)
-		binder := NewBinderWithAPIReader(apiClient, apiClient, rrs, binderPlugins)
+		binder := NewBinder(apiClient, apiClient, rrs, binderPlugins)
 		err := binder.Bind(ctx, pod, node, br)
 		require.ErrorContains(t, err, preBindErr.Error())
 		assert.False(t, errors.Is(err, ErrBindingOutcomeUnknown))
@@ -261,7 +261,7 @@ func TestBindingRetryProtocolAPIServer(t *testing.T) {
 		plugin.EXPECT().PostBind(gomock.Any(), pod, node, br, gomock.Any())
 		binderPlugins := plugins.New()
 		binderPlugins.RegisterPlugin(plugin)
-		binder := NewBinderWithAPIReader(apiClient, apiClient, rrs, binderPlugins)
+		binder := NewBinder(apiClient, apiClient, rrs, binderPlugins)
 		require.NoError(t, binder.Bind(ctx, pod, node, br))
 		actual := readPod(t, pod)
 		assert.Equal(t, node.Name, actual.Spec.NodeName)

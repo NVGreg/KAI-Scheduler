@@ -161,9 +161,9 @@ func TestStatusRetryPreservesBindingResourcesAPIServer(t *testing.T) {
 				scalingPodsNamespace, "", nil, nil, nil, false)
 			binderPlugins := plugins.New()
 			binderPlugins.RegisterPlugin(gpusharing.New(pipelineClient, false, false))
-			// Use the legacy binder to isolate the controller's resource preservation
-			// from the optional binder retry protocol.
-			binder := binding.NewBinder(pipelineClient, rrs, binderPlugins)
+			// A nil reader isolates the controller's resource preservation
+			// from the binder retry protocol.
+			binder := binding.NewBinder(pipelineClient, nil, rrs, binderPlugins)
 			reconciler := NewBindRequestReconciler(pipelineClient, scheme, record.NewFakeRecorder(20), &ReconcilerParams{}, binder, rrs)
 			reconciler.apiReader = direct
 			request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(br)}

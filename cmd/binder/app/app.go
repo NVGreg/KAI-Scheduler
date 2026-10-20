@@ -173,7 +173,7 @@ func (app *App) Run(ctx context.Context) error {
 		return err
 	}
 
-	binder := binding.NewBinderWithAPIReader(app.Client, app.manager.GetAPIReader(), app.rrs, app.plugins)
+	binder := binding.NewBinder(app.Client, app.manager.GetAPIReader(), app.rrs, app.plugins)
 
 	app.InformerFactory.Start(ctx.Done())
 	app.InformerFactory.WaitForCacheSync(ctx.Done())

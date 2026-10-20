@@ -86,7 +86,7 @@ func TestReconcileRetainedBindingState(t *testing.T) {
 			ordinaryPlugin := pluginmock.NewMockPlugin(mockController)
 			ordinaryPlugin.EXPECT().PreBind(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).Times(1)
 			binderPlugins.RegisterPlugin(ordinaryPlugin)
-			binder := binding.NewBinderWithAPIReader(kubeClient, apiReader, rrs, binderPlugins)
+			binder := binding.NewBinder(kubeClient, apiReader, rrs, binderPlugins)
 			reconciler := NewBindRequestReconciler(backing, scheme, record.NewFakeRecorder(10), &ReconcilerParams{}, binder, rrs)
 			reconciler.apiReader = apiReader
 			key := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(request)}

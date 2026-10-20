@@ -49,14 +49,10 @@ type Binder struct {
 	plugins                    *plugins.BinderPlugins
 }
 
-func NewBinder(kubeClient client.Client, rrs resourcereservation.Interface, plugins *plugins.BinderPlugins) *Binder {
-	return NewBinderWithAPIReader(kubeClient, nil, rrs, plugins)
-}
-
-// NewBinderWithAPIReader uses Pod resourceVersion preconditions to exclude prior
-// binding attempts before retry or rollback. apiReader must bypass the cache.
-// NewBinder retains the legacy behavior without this retry protocol.
-func NewBinderWithAPIReader(kubeClient client.Client, apiReader client.Reader, rrs resourcereservation.Interface, plugins *plugins.BinderPlugins) *Binder {
+// NewBinder uses Pod resourceVersion preconditions to exclude prior binding
+// attempts before retry or rollback. A non-nil apiReader must bypass the cache.
+// A nil apiReader disables the retry protocol.
+func NewBinder(kubeClient client.Client, apiReader client.Reader, rrs resourcereservation.Interface, plugins *plugins.BinderPlugins) *Binder {
 	return &Binder{
 		kubeClient:                 kubeClient,
 		apiReader:                  apiReader,
@@ -66,7 +62,7 @@ func NewBinderWithAPIReader(kubeClient client.Client, apiReader client.Reader, r
 }
 
 // PrepareBindingAttempt makes prior resourceVersion-constrained Binding requests
-// stale. The legacy constructor retains its previous pre-Bind failure behavior.
+// stale. A nil apiReader retains the previous pre-Bind failure behavior.
 func (b *Binder) PrepareBindingAttempt(ctx context.Context, pod *v1.Pod) error {
 	if b.apiReader == nil {
 		return nil

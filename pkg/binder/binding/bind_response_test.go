@@ -31,17 +31,17 @@ import (
 
 func TestBindConfirmsSuccessfulBindingAfterResponseError(t *testing.T) {
 	for _, tt := range []struct {
-		name           string
-		response       error
-		observedUID    types.UID
-		observedNode   string
-		readErr        error
-		changeVersion  bool
-		loseFenceReply bool
-		cancelContext  bool
-		legacyBinder   bool
-		wantSuccess    bool
-		wantUnknown    bool
+		name             string
+		response         error
+		observedUID      types.UID
+		observedNode     string
+		readErr          error
+		changeVersion    bool
+		loseFenceReply   bool
+		cancelContext    bool
+		withoutAPIReader bool
+		wantSuccess      bool
+		wantUnknown      bool
 	}{
 		{name: "normal success", wantSuccess: true},
 		{name: "same Pod bound to selected node", response: io.ErrUnexpectedEOF, observedNode: "selected-node", wantSuccess: true},
@@ -52,7 +52,7 @@ func TestBindConfirmsSuccessfulBindingAfterResponseError(t *testing.T) {
 		{name: "lost exclusion write response is read back", response: io.ErrUnexpectedEOF, loseFenceReply: true},
 		{name: "read failure remains unknown", response: io.ErrUnexpectedEOF, readErr: errors.New("API unavailable"), wantUnknown: true},
 		{name: "canceled context remains unknown", response: io.ErrUnexpectedEOF, cancelContext: true, wantUnknown: true},
-		{name: "legacy constructor preserves rejection behavior", response: io.ErrUnexpectedEOF, legacyBinder: true},
+		{name: "nil API reader preserves rejection behavior", response: io.ErrUnexpectedEOF, withoutAPIReader: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -88,7 +88,7 @@ func TestBindConfirmsSuccessfulBindingAfterResponseError(t *testing.T) {
 					request := body.(*v1.Binding)
 					require.Equal(t, types.UID("pod-uid"), request.UID)
 					bindingVersion = request.ResourceVersion
-					if !tt.legacyBinder {
+					if !tt.withoutAPIReader {
 						require.NotEmpty(t, bindingVersion)
 						require.Equal(t, pod.ResourceVersion, bindingVersion)
 					}
@@ -108,7 +108,7 @@ func TestBindConfirmsSuccessfulBindingAfterResponseError(t *testing.T) {
 					return tt.response
 				},
 			})
-			apiReader := interceptor.NewClient(backing, interceptor.Funcs{
+			var apiReader client.Reader = interceptor.NewClient(backing, interceptor.Funcs{
 				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 					deadline, ok := ctx.Deadline()
 					require.True(t, ok)
@@ -125,7 +125,7 @@ func TestBindConfirmsSuccessfulBindingAfterResponseError(t *testing.T) {
 			controller := gomock.NewController(t)
 			rrs := rrmock.NewMockInterface(controller)
 			rrs.EXPECT().SyncForNode(gomock.Any(), node.Name).DoAndReturn(func(context.Context, string) error {
-				if !tt.legacyBinder {
+				if !tt.withoutAPIReader {
 					require.Equal(t, 1, fenceWrites, "the entry write must precede reservation work")
 				}
 				return nil
@@ -147,10 +147,10 @@ func TestBindConfirmsSuccessfulBindingAfterResponseError(t *testing.T) {
 			}
 			binderPlugins := plugins.New()
 			binderPlugins.RegisterPlugin(plugin)
-			binder := NewBinderWithAPIReader(kubeClient, apiReader, rrs, binderPlugins)
-			if tt.legacyBinder {
-				binder = NewBinder(kubeClient, rrs, binderPlugins)
+			if tt.withoutAPIReader {
+				apiReader = nil
 			}
+			binder := NewBinder(kubeClient, apiReader, rrs, binderPlugins)
 			err := binder.Bind(ctx, pod, node, br)
 			require.Equal(t, 1, bindCalls)
 			assert.Equal(t, tt.wantUnknown, errors.Is(err, ErrBindingOutcomeUnknown))
@@ -159,7 +159,7 @@ func TestBindConfirmsSuccessfulBindingAfterResponseError(t *testing.T) {
 			} else {
 				assert.ErrorIs(t, err, tt.response)
 			}
-			if tt.response != nil && !tt.wantSuccess && !tt.wantUnknown && !tt.legacyBinder {
+			if tt.response != nil && !tt.wantSuccess && !tt.wantUnknown && !tt.withoutAPIReader {
 				stored := &v1.Pod{}
 				require.NoError(t, backing.Get(context.Background(), client.ObjectKeyFromObject(pod), stored))
 				assert.Empty(t, stored.Spec.NodeName)
@@ -202,7 +202,7 @@ func TestBindingPreflightPreservesUnknownAttempts(t *testing.T) {
 				},
 			})
 			rrs := rrmock.NewMockInterface(gomock.NewController(t))
-			binder := NewBinderWithAPIReader(kubeClient, kubeClient, rrs, plugins.New())
+			binder := NewBinder(kubeClient, kubeClient, rrs, plugins.New())
 			err := binder.Bind(ctx, pod, &v1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node"}}, &v1alpha2.BindRequest{})
 			require.ErrorIs(t, err, ErrBindingOutcomeUnknown)
 			stored := &v1.Pod{}
