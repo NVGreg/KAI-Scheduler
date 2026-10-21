@@ -36,8 +36,6 @@ type Binder struct {
 	plugins                    *plugins.BinderPlugins
 }
 
-// NewBinder configures binding confirmation using a reader that must bypass the informer cache.
-// A nil apiReader disables confirmation for isolated tests.
 func NewBinder(kubeClient client.Client, apiReader client.Reader, rrs resourcereservation.Interface, plugins *plugins.BinderPlugins) *Binder {
 	return &Binder{
 		kubeClient:                 kubeClient,
