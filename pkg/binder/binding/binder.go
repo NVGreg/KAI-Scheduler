@@ -49,9 +49,6 @@ type Binder struct {
 	plugins                    *plugins.BinderPlugins
 }
 
-// NewBinder uses Pod resourceVersion preconditions to exclude prior binding
-// attempts before retry or rollback. A non-nil apiReader must bypass the cache.
-// A nil apiReader disables the retry protocol.
 func NewBinder(kubeClient client.Client, apiReader client.Reader, rrs resourcereservation.Interface, plugins *plugins.BinderPlugins) *Binder {
 	return &Binder{
 		kubeClient:                 kubeClient,
